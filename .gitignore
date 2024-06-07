@@ -4,6 +4,8 @@ server/node_modules
 server/public
 ./server/public
 
+package-lock.json
+
 .DS_STORE
 
 *.bak
