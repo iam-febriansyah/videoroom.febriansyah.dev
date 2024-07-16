@@ -4,7 +4,7 @@ const roomIdInput = document.getElementById('roomId');
 
 let localStream;
 let peerConnection;
-let signalingServer;
+const socket = io('http://localhost:8080', { transports : ['websocket'] });
 const configuration = {
     iceServers: [
         {
@@ -23,37 +23,37 @@ joinRoomButton.addEventListener('click', () => {
 });
 
 function joinRoom(roomId) {
-    signalingServer = new WebSocket(`wss://your.signaling.server?roomId=${roomId}`);
+    socket.emit('joinRoom', roomId);
 
-    signalingServer.onmessage = async message => {
-        const data = JSON.parse(message.data);
+    socket.on('offer', async (offer) => {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        socket.emit('answer', { answer, roomId });
+    });
 
-        if (data.offer) {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-            const answer = await peerConnection.createAnswer();
-            await peerConnection.setLocalDescription(answer);
-            signalingServer.send(JSON.stringify({ 'answer': answer }));
-        } else if (data.answer) {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-        } else if (data.candidate) {
-            try {
-                await peerConnection.addIceCandidate(data.candidate);
-            } catch (e) {
-                console.error('Error adding received ice candidate', e);
-            }
+    socket.on('answer', async (answer) => {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+    });
+
+    socket.on('candidate', async (candidate) => {
+        try {
+            await peerConnection.addIceCandidate(candidate);
+        } catch (e) {
+            console.error('Error adding received ice candidate', e);
         }
-    };
+    });
 
-    startLocalStream();
+    startLocalStream(roomId);
 }
 
-function startLocalStream() {
+function startLocalStream(roomId) {
     navigator.mediaDevices.getUserMedia({ video: true, audio: true })
         .then(stream => {
             const localVideo = createVideoElement('localVideo', true);
             localVideo.srcObject = stream;
             localStream = stream;
-            initializePeerConnection();
+            initializePeerConnection(roomId);
         })
         .catch(error => {
             console.error('Error accessing media devices.', error);
@@ -67,7 +67,7 @@ function createVideoElement(id, isLocal = false) {
     video.autoplay = true;
     video.playsInline = true;
     videoWrapper.appendChild(video);
-    
+
     // Optionally add metadata
     const metadata = document.createElement('div');
     metadata.className = 'metadata';
@@ -78,7 +78,7 @@ function createVideoElement(id, isLocal = false) {
     return video;
 }
 
-function initializePeerConnection() {
+function initializePeerConnection(roomId) {
     peerConnection = new RTCPeerConnection(configuration);
 
     // Add local stream tracks to the peer connection
@@ -89,7 +89,7 @@ function initializePeerConnection() {
     // Handle ICE candidates
     peerConnection.onicecandidate = event => {
         if (event.candidate) {
-            signalingServer.send(JSON.stringify({ 'candidate': event.candidate }));
+            socket.emit('candidate', { candidate: event.candidate, roomId });
         }
     };
 
@@ -102,11 +102,43 @@ function initializePeerConnection() {
         }
         remoteVideo.srcObject = event.streams[0];
     };
+
+    // Create and send an offer
+    peerConnection.createOffer()
+        .then(offer => {
+            return peerConnection.setLocalDescription(offer);
+        })
+        .then(() => {
+            socket.emit('offer', { offer: peerConnection.localDescription, roomId });
+        })
+        .catch(error => {
+            console.error('Error creating offer:', error);
+        });
+
 }
 
-// Function to create and send an offer
-async function createOffer() {
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    signalingServer.send(JSON.stringify({ 'offer': offer }));
+function toggleAudioById(streamId) {
+    const videoElement = document.getElementById(streamId);
+    if (videoElement && videoElement.srcObject) {
+        const audioTracks = videoElement.srcObject.getAudioTracks();
+        audioTracks.forEach(track => {
+            track.enabled = !track.enabled;
+        });
+        console.log(audioTracks[0].enabled ? 'Audio enabled' : 'Audio disabled');
+    } else {
+        console.error(`Stream with ID ${streamId} not found or has no audio tracks.`);
+    }
+}
+
+function toggleVideoById(streamId) {
+    const videoElement = document.getElementById(streamId);
+    if (videoElement && videoElement.srcObject) {
+        const videoTracks = videoElement.srcObject.getVideoTracks();
+        videoTracks.forEach(track => {
+            track.enabled = !track.enabled;
+        });
+        console.log(videoTracks[0].enabled ? 'Video enabled' : 'Video disabled');
+    } else {
+        console.error(`Stream with ID ${streamId} not found or has no video tracks.`);
+    }
 }

@@ -1,34 +1,45 @@
-const WebSocket = require('ws');
-const url = require('url');
-const server = new WebSocket.Server({ port: 8080 });
+const socketIo = require('socket.io');
+const express = require('express');
+const http = require('http');
+const cors = require('cors');
 
-const rooms = {}; // Store clients per room
+const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, { origins: '*:*'});
+const PORT = process.env.PORT || 8080;
 
-server.on('connection', (socket, req) => {
-    const parameters = url.parse(req.url, true);
-    const roomId = parameters.query.roomId;
+const corsOptions = {
+    origin: 'http://webrtc.local', // Specify your client origin
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type'],
+    credentials: true
+};
+app.use(cors(corsOptions));
 
-    if (!rooms[roomId]) {
-        rooms[roomId] = [];
-    }
-    rooms[roomId].push(socket);
-
-    socket.on('message', message => {
-        // Broadcast the message to all clients in the room except the sender
-        rooms[roomId].forEach(client => {
-            if (client !== socket && client.readyState === WebSocket.OPEN) {
-                client.send(message);
-            }
-        });
+io.on('connection', (socket, req) => {
+    socket.on('joinRoom', (roomId) => {
+        socket.join(roomId);
+        console.log(`User ${socket.id} joined room ${roomId}`);
     });
 
-    socket.on('close', () => {
-        // Remove the client from the room
-        rooms[roomId] = rooms[roomId].filter(client => client !== socket);
-        if (rooms[roomId].length === 0) {
-            delete rooms[roomId];
-        }
+    socket.on('offer', (data) => {
+        socket.to(data.roomId).emit('offer', data.offer);
+    });
+
+    socket.on('answer', (data) => {
+        socket.to(data.roomId).emit('answer', data.answer);
+    });
+
+    socket.on('candidate', (data) => {
+        socket.to(data.roomId).emit('candidate', data.candidate);
+    });
+
+    socket.on('disconnect', () => {
+        console.log('user disconnected', socket.id);
     });
 });
 
-console.log('Signaling server is running on ws://localhost:8080');
+server.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
+
