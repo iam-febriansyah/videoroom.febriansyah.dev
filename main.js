@@ -142,3 +142,23 @@ function toggleVideoById(streamId) {
         console.error(`Stream with ID ${streamId} not found or has no video tracks.`);
     }
 }
+
+
+var myId = localStorage.getItem("myId") === null ? genID() : '';
+window.onload = function () {
+    if (localStorage.getItem("myId") === null) {
+        localStorage.setItem("myId", genID());
+    }
+}
+
+function genID() {
+    const timeStamp = Date.now();
+    let str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+    let Id = '';
+    for (let i = 0; i < 7; i++) {
+        let rom = Math.floor(1 +(str.length -1)*Math.random());
+        Id += str.charAt(rom);
+    }
+    Id += timeStamp.toString();
+    return Id;
+}
