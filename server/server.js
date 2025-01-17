@@ -34,7 +34,7 @@ const createOrUpdateUser = async (username, group_id, id_socket, active) => {
       { username, group_id, id_socket, active },
       { upsert: true, new: true }
     );
-    return await getAllUsers();
+    return await getAllUsers(group_id);
   } catch (error) {
     console.error("Error saving user:", error.message);
     return false;
@@ -110,77 +110,94 @@ app.use(
 io.on("connection", (socket) => {
   console.log("A user connected:", socket.id);
 
-  socket.on("register", async (data) => {
-    const { username, group_id } = data;
-    var users = await createOrUpdateUser(username, group_id, socket.id,  '1');
-    io.emit("updateUserList", users.map(user => user.username));
+  socket.on("register", async ({ username, group_id }) => {
+
+    if (!username || !group_id) {
+      console.error("Invalid register data:", data);
+      io.to(socket.id).emit("register_failed", "Invalid username / group_id");
+      return;
+    }
+
+    try {
+      const user = await createOrUpdateUser(username, group_id, socket.id, '1');
+      if (!user) {
+        io.to(socket.id).emit("register_failed", "Error registering user");
+        return;
+      }
+
+      socket.join(group_id);
+      const users = await getAllUsers(group_id);
+      io.to(group_id).emit("updateUserList", users.map((user) => user.username));
+      console.log(`User registered: ${username} in group ${group_id}`);
+    } catch (error) {
+      console.error("Error during registration:", error.message);
+      io.to(socket.id).emit("register_failed", "Error registering user");
+    }
+
   });
 
-  socket.on("signal", async (data) => {
-    const { signalData, to } = data;
-
-    users = await getAllUsers();
-    users = users.filter((user) => user.active === '1');
-
-    if (signalData.type === "offer") {
-      const fromUser = users.find(user => user.id_socket === socket.id);
-      if(fromUser){
-        console.log(`Received offer from ${fromUser.username}`);
-        const toUser = users.find(user => user.username === to);
-        if(toUser){
-          io.to(toUser.id_socket).emit("signal", {
-            from: fromUser.username,
-            signalData,
-          });
-          console.log(`Sent offer to ${to}`);
-        }
-      }
-    } else if (signalData.type === "answer") {
-      const fromUser = users.find(user => user.id_socket === socket.id);
-      if(fromUser){
-        console.log(`Received answer from ${fromUser.username} to ${to}`);
-        const toUser = users.find(user => user.username === to);
-        if(toUser){
-          io.to(toUser.id_socket).emit("signal", {
-            from: fromUser.username,
-            signalData,
-          });
-          console.log(`Sent offer to ${to}`);
-        }
-      }
-    } else if (signalData.type === "candidate") {
-      console.log(`Received ICE candidate from ${to}`);
-      users.forEach((user) => {
-        if (user.id_socket !== socket.id) {
-          io.to(user.id_socket).emit("signal", {
-            from: to,
-            signalData,
-          });
-        }
-      });
-    } else {
-      console.log("Unknown signal type");
+  socket.on("disconnect_user", async () => {
+    const user = await getUserBySocketId(socket.id);
+    if (user) {
+      await createOrUpdateUser(user.username, user.group_id, socket.id, '0');
+      const groupUsers = await getAllUsers(user.group_id);
+      io.to(user.group_id).emit("disconnect_user", user.username);
+      io.to(user.group_id).emit("updateUserList", groupUsers.map((u) => u.username));
+      console.log(`${user.username} disconnected from group ${user.group_id}`);
     }
   });
-
 
   socket.on("disconnect", async () => {
     console.log("User disconnected:", socket.id);
-    var user = await getUserBySocketId(socket.id);
-    if(user){
-      users.forEach((userBroadcast) => {
-        if (userBroadcast.id_socket !== socket.id) {
-          console.log("disconnect_user", user.username)
-          io.to(userBroadcast.id_socket).emit("disconnect_user", user.username);
-        }
-      });
-      await createOrUpdateUser(user.username, socket.id, '0');
-      users = users.filter((user) => user.active == '1');
-    }else{
-      users = users.filter((user) => user.id_socket !== socket.id);
+    const user = await getUserBySocketId(socket.id);
+    if (user) {
+        await createOrUpdateUser(user.username, user.group_id, socket.id, '0');
+        const groupUsers = await getAllUsers(user.group_id);
+        io.to(user.group_id).emit("disconnect_user", user.username);
+        io.to(user.group_id).emit("updateUserList", groupUsers.map((u) => u.username));
+        console.log(`${user.username} disconnected from group ${user.group_id}`);
     }
-    io.emit("updateUserList", users.map(user => user.username));
   });
+
+  socket.on("signal", async (data) => {
+    const { from, signalData, group_id } = data;
+    if (!signalData || !group_id) {
+      console.error("Invalid signal data:", data);
+      io.to(socket.id).emit("signal_failed", "Invalid signal data or group_id");
+      return;
+    }
+
+    try {
+      const users = await getAllUsers(group_id);
+      const fromUser = users.find((user) => user.username === from);
+      const { type, candidate, sdp } = signalData;
+
+      if (!fromUser) {
+        console.log(data)
+        console.error("User not found for signaling. username : ", from);
+        io.to(socket.id).emit("signal_failed", "User not found in group. username : "+from);
+        return;
+      }
+
+      console.log(`Broadcasting ICE candidate from ${fromUser.username} to group ${group_id}`);
+
+      if (type === "offer" || type === "answer" || type === "candidate") {
+        io.to(group_id).emit("signal", { from : from, signalData: { type, candidate, sdp } });
+        if(type == "candidate"){
+          const groupUsers = await getAllUsers(group_id);
+          io.to(group_id).emit("updateUserList", groupUsers.map((u) => u.username));
+        }
+        if(type == 'offer'){
+          io.to(group_id).emit("update_videos", from);
+        }
+        console.log(`Signal ${type} from ${from} to group ${group_id}`);
+      }
+    } catch (error) {
+      console.error("Error during signal handling:", error.message);
+      io.to(socket.id).emit("signal_failed", "Error handling signal");
+    }
+  });
+
 });
 
 app.get("/", (req, res) => {
