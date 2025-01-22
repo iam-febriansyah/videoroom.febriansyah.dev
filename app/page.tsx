@@ -4,11 +4,11 @@ import { useSocketContext } from './context/SocketContext';
 
 
 export default function Home() {
-    const { remoteVideos, localVideoRef, usernameRef } = useSocketContext();
+    const { remoteVideoRefs, localVideoRef, usernameRef } = useSocketContext();
 
     useEffect(() => {
-        console.log(remoteVideos);
-    }, [remoteVideos]);
+        console.log(remoteVideoRefs);
+    }, [remoteVideoRefs]);
 
 
     return (
@@ -18,7 +18,7 @@ export default function Home() {
                 <video ref={localVideoRef} autoPlay muted/>
             </div>
             <div id="remote-videos">
-            {Object.entries(remoteVideos).map(([key, videoElement]) => (
+            {Object.entries(remoteVideoRefs).map(([key, videoElement]) => (
                 <div key={key} className="max-w-sm rounded-sm overflow-hidden shadow-sm bg-red-500">
                     <video
                     ref={(ref) => {

@@ -16,6 +16,7 @@ const connectDB = async () => {
       username: { type: String, required: true, unique: true  },
       id_socket: { type: String, required: true, unique: true },
       group_id : { type: String, required: true },
+      is_owner : { type: String, required: true },
       active : { type: String, required: true },
     });
     UserTable = mongoose.model("User", userSchema);
@@ -27,16 +28,29 @@ const connectDB = async () => {
   }
 };
 
-const createOrUpdateUser = async (username, group_id, id_socket, active) => {
+const createOrUpdateUser = async (username, group_id, is_owner, id_socket, active) => {
   try {
     await UserTable.findOneAndUpdate(
       { username },
-      { username, group_id, id_socket, active },
+      { username, group_id, is_owner, id_socket, active },
       { upsert: true, new: true }
     );
     return await getAllUsers(group_id);
   } catch (error) {
-    console.error("Error saving user:", error.message);
+    console.error("Error save/update user:", error.message);
+    return false;
+  }
+};
+
+const setOwner = async (username, group_id, is_owner, id_socket) => {
+  try {
+    return await UserTable.findOneAndUpdate(
+      { username },
+      { username, group_id, is_owner, id_socket },
+      { upsert: true, new: true }
+    );
+  } catch (error) {
+    console.error("Error setOwner user:", error.message);
     return false;
   }
 };
@@ -66,6 +80,69 @@ const getUserBySocketId = async (id_socket) => {
   }
 };
 
+const getUserByUsernameGroupId = async (username, group_id) => {
+  try {
+    const user = await UserTable.findOne({ group_id : group_id, username : username });
+    if (!user) {
+      console.log("User not found");
+      return false;
+    } else {
+      console.log("User found:", user);
+      return user;
+    }
+  } catch (error) {
+    console.error("Error fetching user:", error.message);
+    return false;
+  }
+};
+
+const getUserByUsername = async (username) => {
+  try {
+    const user = await UserTable.findOne({ username : username });
+    if (!user) {
+      console.log("User not found");
+      return false;
+    } else {
+      console.log("User found:", user);
+      return user;
+    }
+  } catch (error) {
+    console.error("Error fetching user:", error.message);
+    return false;
+  }
+};
+
+const getUserByGroupId = async (group_id) => {
+  try {
+    const user = await UserTable.findOne({ group_id});
+    if (!user) {
+      console.log("User not found");
+      return false;
+    } else {
+      console.log("User found:", user);
+      return user;
+    }
+  } catch (error) {
+    console.error("Error fetching user:", error.message);
+    return false;
+  }
+};
+
+const checkHaveOwner = async (group_id) => {
+  try {
+    const user = await UserTable.findOne({ group_id, is_owner : '1'});
+    if (!user) {
+      console.log("User not found");
+      return false;
+    } else {
+      console.log("User found:", user);
+      return user;
+    }
+  } catch (error) {
+    console.error("Error fetching user:", error.message);
+    return false;
+  }
+};
 
 const connectMongo = async () => {
   await connectDB();
@@ -107,95 +184,150 @@ app.use(
   })
 );
 
+async function socketRegister(socket, io, data) {
+  var { username, group_id } = data;
+  if (!username || !group_id) {
+    console.error("Invalid register data:", data);
+    io.to(socket.id).emit("register_failed", "Invalid username / group_id");
+    return;
+  }
+
+  try {
+    var is_owner = '0';
+    var members = await getAllUsers(group_id);
+    if(members.length == 0){
+      is_owner = '1';
+    }
+
+    const user = await createOrUpdateUser(username, group_id, is_owner, socket.id, '1');
+    if (!user) {
+      io.to(socket.id).emit("register_failed", "Error registering user");
+      return;
+    }
+
+    socket.join(group_id);
+    if(is_owner == '0'){
+      io.in(group_id).emit('join', group_id); // Notify users in room
+      io.to(socket.id).emit('joined', group_id, username); // Notify client that they joined a room
+      console.log('socketRegister', 'A new member joined ', username, socket.id)
+    }else{
+      socket.emit('created', group_id, username);
+      console.log('socketRegister', 'A new group created ', username, socket.id)
+    }
+  } catch (error) {
+    console.error("Error during registration:", error.message);
+    io.to(socket.id).emit("register_failed", "Error registering user");
+  }
+}
+
+async function disconnectUser(socket_id) {
+  try {
+    const user = await getUserBySocketId(socket_id);
+    if (user) {
+      await createOrUpdateUser(user.username, '', '0', user.username, '0');
+      socket.leave(user.group_id);
+      return user;
+    }
+    return false;
+  } catch (error) {
+    console.error("Error during disconnectUser:", error.message);
+  }
+}
+
+async function kickUser(socket, data) {
+  try {
+    var { username, group_id } = data
+    const user = await getUserBySocketId(socket.id);
+    if (user) {
+      if(user.is_owner == '1'){
+        const userKick = await getUserByUsernameGroupId(username, group_id);
+        if(userKick){
+          await createOrUpdateUser(userKick.username, '', '0', '', '0');
+          socket.leave(userKick.group_id);
+          return userKick;
+        }
+      }
+    }
+    return false;
+  } catch (error) {
+    console.error("Error during kickUser:", error.message);
+  }
+}
+
+async function broadcastLeave(socket, group_id, username) {
+  socket.broadcast.to(group_id).emit('message', { type: 'leave' }, username);
+  var checkOwner = await checkHaveOwner(group_id);
+  if(checkOwner){
+    var ownerSoon = await getUserByGroupId(group_id);
+    if(ownerSoon){
+      var result = await setOwner(ownerSoon.username, ownerSoon.group_id, '1', ownerSoon.socket_id);
+      if(result){
+        socket.broadcast.to(group_id).emit('message', { type: 'new_owner' }, ownerSoon.username);
+      }
+    }
+  }
+}
+
 io.on("connection", (socket) => {
   console.log("A user connected:", socket.id);
 
   socket.on("register", async ({ username, group_id }) => {
+    await socketRegister(socket, io, {username, group_id})
+  });
 
-    if (!username || !group_id) {
-      console.error("Invalid register data:", data);
-      io.to(socket.id).emit("register_failed", "Invalid username / group_id");
-      return;
+  socket.on('message', async (message, toId = null, group_id = null) => {
+    const user = await getUserBySocketId(socket.id);
+    console.log(message, 'from', user.username)
+    if (toId) {
+        const toIdUser = await getUserByUsername(toId);
+        if(toIdUser){
+          console.log('message toId', toIdUser.username, message)
+          io.to(toIdUser.id_socket).emit('message', message, user.username);
+        }
+    } else if (group_id) {
+        console.log('message group_id', group_id, message)
+        socket.broadcast.to(group_id).emit('message', message, user.username);
+    } else {
+        socket.broadcast.emit('message', message, user.username);
     }
-
-    try {
-      const user = await createOrUpdateUser(username, group_id, socket.id, '1');
-      if (!user) {
-        io.to(socket.id).emit("register_failed", "Error registering user");
-        return;
-      }
-
-      socket.join(group_id);
-      const users = await getAllUsers(group_id);
-      io.to(group_id).emit("updateUserList", users.map((user) => user.username));
-      console.log(`User registered: ${username} in group ${group_id}`);
-    } catch (error) {
-      console.error("Error during registration:", error.message);
-      io.to(socket.id).emit("register_failed", "Error registering user");
-    }
-
   });
 
   socket.on("disconnect_user", async () => {
-    const user = await getUserBySocketId(socket.id);
-    if (user) {
-      await createOrUpdateUser(user.username, user.group_id, socket.id, '0');
-      const groupUsers = await getAllUsers(user.group_id);
-      io.to(user.group_id).emit("disconnect_user", user.username);
-      io.to(user.group_id).emit("updateUserList", groupUsers.map((u) => u.username));
-      console.log(`${user.username} disconnected from group ${user.group_id}`);
-    }
+    var user = await disconnectUser(socket.id)
+    await broadcastLeave(socket, user.group_id, user.username);
   });
 
   socket.on("disconnect", async () => {
-    console.log("User disconnected:", socket.id);
-    const user = await getUserBySocketId(socket.id);
-    if (user) {
-        await createOrUpdateUser(user.username, user.group_id, socket.id, '0');
-        const groupUsers = await getAllUsers(user.group_id);
-        io.to(user.group_id).emit("disconnect_user", user.username);
-        io.to(user.group_id).emit("updateUserList", groupUsers.map((u) => u.username));
-        console.log(`${user.username} disconnected from group ${user.group_id}`);
+    var user = await disconnectUser(socket.id)
+    if(user){
+      await broadcastLeave(socket, user.group_id, user.username);
     }
   });
 
-  socket.on("signal", async (data) => {
-    const { from, signalData, group_id } = data;
-    if (!signalData || !group_id) {
-      console.error("Invalid signal data:", data);
-      io.to(socket.id).emit("signal_failed", "Invalid signal data or group_id");
-      return;
+  socket.on("kick", async (username, group_id) => {
+    var user = await kickUser(socket, {username, group_id})
+    if(user){
+      await broadcastLeave(socket, user.group_id, user.username);
     }
+  });
 
-    try {
-      const users = await getAllUsers(group_id);
-      const fromUser = users.find((user) => user.username === from);
-      const { type, candidate, sdp } = signalData;
-
-      if (!fromUser) {
-        console.log(data)
-        console.error("User not found for signaling. username : ", from);
-        io.to(socket.id).emit("signal_failed", "User not found in group. username : "+from);
-        return;
+  socket.on("leave", async (username) => {
+    var userActive = await getUserByUsername(username);
+    if(userActive){
+      var socket_id = userActive.socket_id;
+      var user = await disconnectUser(socket_id)
+      if(user){
+        await broadcastLeave(socket, user.group_id, user.username);
       }
-
-      console.log(`Broadcasting ICE candidate from ${fromUser.username} to group ${group_id}`);
-
-      if (type === "offer" || type === "answer" || type === "candidate") {
-        io.to(group_id).emit("signal", { from : from, signalData: { type, candidate, sdp } });
-        if(type == "candidate"){
-          const groupUsers = await getAllUsers(group_id);
-          io.to(group_id).emit("updateUserList", groupUsers.map((u) => u.username));
-        }
-        if(type == 'offer'){
-          io.to(group_id).emit("update_videos", from);
-        }
-        console.log(`Signal ${type} from ${from} to group ${group_id}`);
-      }
-    } catch (error) {
-      console.error("Error during signal handling:", error.message);
-      io.to(socket.id).emit("signal_failed", "Error handling signal");
     }
+  });
+
+  socket.on('disconnecting', () => {
+    socket.rooms.forEach(async (group_id) => {
+        if (group_id === socket.id) return;
+        var user = await getUserBySocketId(socket.id)
+        socket.broadcast.to(group_id).emit('message', { type: 'leave' }, user.username);
+    });
   });
 
 });

@@ -1,127 +1,50 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 "use client"
-import React, { createContext, useContext, useEffect, useRef, useState } from "react";
+import React, { createContext, useContext, useEffect, useRef } from "react";
 import { io, Socket } from "socket.io-client";
 import { useSearchParams } from 'next/navigation';
 
 const SocketContext = createContext<any>(null);
 
 export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
+  const isCallActive = useRef<boolean>(false);
   const socket = useRef<Socket | null>(null);
   const usernameRef = useRef<HTMLInputElement | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const isCallActive = useRef<boolean>(false);
   const remoteVideoRefs = useRef<{ [key: string]: HTMLVideoElement }>({});
-  const userActive = useRef<string[]>([]);
   const peerConnections = useRef<{ [key: string]: RTCPeerConnection }>({});
   const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRefs = useRef<{ [key: string]: MediaStream }>({});
   const searchParams = useSearchParams();
   const group_id = searchParams.get('group_id') ? searchParams.get('group_id') == '' ? null : searchParams.get('group_id') : null;
-//   const [remoteVideos, setRemoteVideos] = useState<{ [key: string]: HTMLVideoElement }>({});
-  const [remoteVideos, setRemoteVideos] = useState<Record<string, HTMLVideoElement>>({});
-    
+
+  const peerConnectionConfig = {
+    iceServers: [
+        {
+            urls: [
+                'stun:stun.l.google.com:19302',
+                'stun:stun1.l.google.com:19302',
+                'stun:stun2.l.google.com:19302',
+                'stun:stun3.l.google.com:19302',
+                'stun:stun4.l.google.com:19302',
+            ],
+        },
+    ],
+  };
 
   useEffect(() => {
     socket.current = io(process.env.URL_SOCKET || "http://localhost:3001");
-    socket.current.on("connect", () => {
-        console.log("Socket connected:", socket.current?.id);
-    });
-    socket.current.on("updateUserList", async (userList: string[]) => {
-        if(!group_id) return;
-        userActive.current = userList;
-        await updateUsers();
-    });
-    socket.current.on("disconnect_user", async (username: string) => {
-        removePeerConnection(username);
+    socket.current.on("connect", async () => {
+      console.log("Socket connected:", socket.current?.id);
     });
     socket.current?.on("disconnect", async () => {
         console.log("Socket has been disconnected");
-        await updateUsers();
     });
-
-    socket.current.on("signal", async (data) => {
-      if (!group_id || !data.signalData) return;
-
-      const { from, signalData } = data;
-      const { type, candidate, sdp } = signalData;
-      const peerConnection = peerConnections.current[from];
-
-      if (type === "candidate") {
-        if (peerConnection) {
-          try {
-            console.log(type, from, peerConnection.signalingState)
-            if ((!peerConnection.remoteDescription || !peerConnection.remoteDescription.type)) {
-                peerConnection.onnegotiationneeded = async () => {
-                    try {
-                        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.signalData));
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(data.signalData.candidate));
-                    } catch (error) {
-                        console.error('Error handling ICE candidate:', error);
-                    }
-                };
-                return;
-            }
-            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-          } catch (error) {
-            console.error("Error adding ICE candidate:", error);
-          }
-        }
-      }
-
-      if (type === "offer") {
-        console.log(type, from, peerConnection.signalingState)
-        if (peerConnection) {
-          try {
-            if (peerConnection.signalingState == 'stable') {
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-                const answer = await peerConnection.createAnswer();
-                await peerConnection.setLocalDescription(answer);
-                socket.current?.emit("signal", { from : usernameRef.current?.value, group_id : group_id, signalData: { type: "answer", sdp: answer } });
-            }else if (peerConnection.signalingState === "have-local-offer") {
-                // Wait for the negotiation to finish
-                console.warn(`PeerConnection is still negotiating. Waiting for remote description...`);
-                peerConnection.onnegotiationneeded = async () => {
-                    try {
-                        await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-                        const answer = await peerConnection.createAnswer();
-                        await peerConnection.setLocalDescription(answer);
-                        socket.current?.emit("signal", {
-                            from: usernameRef.current?.value,
-                            group_id: group_id,
-                            signalData: { type: "answer", sdp: answer },
-                        });
-                    } catch (error) {
-                        console.error("Error during negotiation:", error);
-                    }
-                };
-            }else{
-                console.warn(`PeerConnection signaling state not stable: ${peerConnection.signalingState}`);
-            }
-          } catch (error) {
-            console.error("Error handling offer:", error);
-          }
-        }
-      }
-
-      if (type === "answer") {
-        console.log(type, from, peerConnection.signalingState)
-        if (peerConnection) {
-          try {
-            if (peerConnection.signalingState === "have-local-offer") {
-                console.log("answer",peerConnection.connectionState)
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-            }else{
-                console.warn(`Unexpected state for setting answer: ${peerConnection.signalingState}`);
-            }
-          } catch (error) {
-            console.error("Error setting remote description:", error);
-          }
-        }
-      }
-
+    socket.current?.on("message", async (message, username) => {
+      console.log(message, username)
+      await handleMessage(message, username)
     });
-
     return () => {
       if (socket.current) {
         socket.current.disconnect();
@@ -129,88 +52,197 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
     };
   }, []);
 
+  function _listener(){
+    socket.current?.on('join', (groupId) => {
+      console.log(`Incoming request to join room ${groupId}`)
+    });
+    socket.current?.on('joined', (groupId, username) => {
+      console.log(`You (local) joined ${groupId} as ${username}`)
+    });
+  }
+
+  async function getLocalStream() {
+    if (!group_id || !usernameRef.current || usernameRef.current.value == '') { return; }
+    return navigator.mediaDevices
+        .getUserMedia({ audio: true, video: { width: 640, height: 480 }})
+        .then((stream) => {
+            localStreamRef.current = stream;
+            if(localVideoRef.current){
+              localVideoRef.current.srcObject = stream;
+              localVideoRef.current.play();
+            }
+            gotStream();
+            return stream;
+        })
+        .catch(() => {
+            console.warn("Can't get usermedia");
+        });
+  }
+
+  function gotStream() {
+    if (group_id) {
+        _sendMessage({ type: 'gotstream' }, null, group_id);
+    }
+  }
+
+  async function _connect(username : any, from : any) {
+    try {
+      console.log('Connecting', username)
+      if (localStreamRef.current && localVideoRef.current) {
+        _createPeerConnection(username);
+        localStreamRef.current.getTracks().forEach((track : any) => {
+          if(localStreamRef.current){
+            peerConnections.current[username].addTrack(track, localStreamRef.current);
+          }
+        });
+        await _makeOffer(username);
+      }else{
+        console.log('_connect have', localStreamRef.current, localVideoRef.current)
+      }
+    } catch (error) {
+      console.error(from, error)
+    }
+  }
+
+  function _createPeerConnection(username : any) {
+    try {
+        if(!username){
+          return;
+        }
+        if (peerConnections.current[username]) {
+            console.warn('Connection with ', username, ' already established'); return;
+        }
+        peerConnections.current[username] = new RTCPeerConnection(peerConnectionConfig);
+        peerConnections.current[username].onicecandidate = (event: any) => {
+          _handleIceCandidate(username, event);
+        };
+        peerConnections.current[username].ontrack = (event: any) => {
+          _handleOnTrack(username, event);
+        };
+        console.log('Created RTCPeerConnnection for ', username);
+    } catch (error) {
+      console.warn('_createPeerConnection', username, error);
+    }
+  }
+
+  async function _makeOffer(username : any) {
+    try {
+      const peerConnection = peerConnections.current[username];
+
+      if (peerConnection.signalingState !== 'stable') {
+        console.error(
+          `_makeOffer: Cannot create an offer. Current signaling state is ${peerConnection.signalingState}`
+        );
+        return;
+      }
+
+      console.log(username, peerConnection)
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+
+      const sessionDescription = peerConnection.localDescription;
+      _sendMessage(sessionDescription, username, null);
+
+      console.log('_makeOffer', username)
+    } catch (error) {
+      console.error('_makeOffer', username, error)
+    }
+  }
+
+  function _handleIceCandidate(username : any, event : any) {
+    console.log('_handleIceCandidate', username, event)
+    if (event.candidate) {
+        _sendMessage(
+            {
+                type: 'candidate',
+                label: event.candidate.sdpMLineIndex,
+                id: event.candidate.sdpMid,
+                candidate: event.candidate.candidate,
+            },
+            username,
+            null
+        );
+    }
+  }
+
+  function _handleOnTrack(username : any, event : any) {
+    console.log('_handleOnTrack', username)
+    if (remoteStreamRefs.current[username]?.id !== event.streams[0].id) {
+        remoteStreamRefs.current[username] = event.streams[0];
+
+        const stream = event.streams[0];
+        const video = document.createElement('video');
+        video.srcObject = stream;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        remoteVideoRefs.current[username] = video;
+
+        // if(!remoteVideoRefs.current[username] && username !== usernameRef.current?.value){
+
+        // }
+        console.log('_handleOnTrack', remoteVideoRefs.current);
+    }
+  }
+
+  function _sendMessage(message : any, toId : string | null, group_id : string | null) {
+    socket.current?.emit('message', message, toId, group_id);
+  }
+
+  function _answer(username : any) {
+    peerConnections.current[username].createAnswer().then((sessionDescription) => {
+      console.log('answer', sessionDescription)
+      _sendMessage(sessionDescription, username, null);
+    })
+  }
+
+  async function handleMessage(message : any, username: any){
+    console.log(message, username)
+    if (peerConnections.current[username] && peerConnections.current[username].connectionState === 'connected') {
+      console.log( 'Connection with ', username, 'is already established');return;
+    }
+
+    if (message.type === 'leave') {
+      removePeerConnection(username)
+      socket.current?.emit('leave', username);return;
+    }
+    switch (message.type) {
+      case 'gotstream':
+        _connect(username, message.type);
+        break;
+      case 'offer':
+        if (!peerConnections.current[username]) {
+            _connect(username, message.type);
+        }
+        peerConnections.current[username].setRemoteDescription(new RTCSessionDescription(message));
+        _answer(username);
+        break;
+      case 'answer':
+        peerConnections.current[username].setRemoteDescription(new RTCSessionDescription(message));
+        break;
+      case 'candidate':
+        const candidate = new RTCIceCandidate({ sdpMLineIndex: message.label, candidate: message.candidate});
+        peerConnections.current[username].addIceCandidate(candidate);
+        break;
+      case 'leave' :
+        removePeerConnection(username);
+        break;
+      case 'new_owner' :
+        console.log('owner', username)
+        break;
+    }
+  }
+
   const startCall = async (username: string) => {
     if(!group_id || !socket.current || !localVideoRef.current) return;
-
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
-        });
-        localStreamRef.current = stream;
-        localVideoRef.current.srcObject = stream;
-        localVideoRef.current.play();
-        isCallActive.current = true;
         socket.current.emit("register", { username, group_id });
+        isCallActive.current = true;
+        getLocalStream();
+        _sendMessage({ type: 'gotstream' }, username, group_id);
+        _listener();
     } catch (error) {
         console.error("Error accessing media devices:", error);
-    }
-  };
-
-  const updateUsers = async () => {
-    if(!group_id) return;
-    const users = userActive.current ?? [];
-    // console.log('total member', users.length)
-    users.forEach(async (user) => {
-        let peerConnection = peerConnections.current[user];
-        if(!peerConnection){
-            peerConnection = new RTCPeerConnection({
-                iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-            });
-
-            // Add local tracks
-            localStreamRef.current?.getTracks().forEach((track) => {
-                if(localStreamRef.current){
-                    peerConnection.addTrack(track, localStreamRef.current);
-                }
-            });
-
-            // Handle ICE candidates
-            peerConnection.onicecandidate = async (event) => {
-                if (event.candidate) {
-                    socket.current?.emit("signal", {
-                        from : user,
-                        group_id: group_id,
-                        signalData: { type: "candidate", candidate: event.candidate }
-                    });
-                }
-            };
-
-            peerConnection.onsignalingstatechange = () => {
-                console.log(`Signaling state changed : ${user} ${peerConnection.signalingState}`);
-            }
-
-            // Handle remote tracks (video)
-            peerConnection.ontrack = (event) => {
-                const remoteVideo = document.createElement("video");
-                remoteVideo.srcObject = event.streams[0];
-                remoteVideo.autoplay = true;
-                remoteVideo.playsInline = true;
-                remoteVideo.muted = true;
-                const userId = user;
-                if(!remoteVideoRefs.current[userId] && userId !== usernameRef.current?.value){
-                    remoteVideoRefs.current[userId] = remoteVideo;
-                }
-            };
-
-            peerConnections.current[user] = peerConnection;
-
-            // Create offer
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-
-            socket.current?.emit("signal", {
-                from : user,
-                group_id: group_id,
-                signalData: { type: "offer", sdp: offer },
-            });
-        }
-    });
-
-    try {
-        setRemoteVideos({ ...remoteVideoRefs.current });
-    } catch (error) {
-        console.error(error)
     }
   };
 
@@ -232,7 +264,6 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
       delete peerConnections.current[removeUser];
       if (remoteVideoRefs.current[removeUser]) {
         delete remoteVideoRefs.current[removeUser];
-        setRemoteVideos({ ...remoteVideoRefs.current }); 
       }
     }
   };
@@ -241,13 +272,10 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
     Object.values(peerConnections.current).forEach((peerConnection) => {
       peerConnection.close();
     });
-
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
     }
-
     peerConnections.current = {};
-    userActive.current = [];
   };
 
   const setUsername = (val: HTMLInputElement | null) => {
@@ -265,8 +293,7 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
         remoteVideoRefs,
         setUsername,
         isCallActive,
-        stopGroupCall,
-        remoteVideos
+        stopGroupCall
       }}
     >
       {children}
