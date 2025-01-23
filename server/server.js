@@ -11,6 +11,7 @@ let UserTable;
 
 const connectDB = async () => {
   try {
+    console.log(process.env.URL_MONGO)
     await mongoose.connect(process.env.URL_MONGO, { });
     const userSchema = new mongoose.Schema({
       username: { type: String, required: true, unique: true  },

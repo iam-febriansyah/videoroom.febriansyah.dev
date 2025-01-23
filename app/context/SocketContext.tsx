@@ -127,25 +127,30 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
 
   async function _makeOffer(username : any) {
     try {
-      const peerConnection = peerConnections.current[username];
 
-      if (peerConnection.signalingState !== 'stable') {
-        console.error(
-          `_makeOffer: Cannot create an offer. Current signaling state is ${peerConnection.signalingState}`
-        );
-        return;
-      }
+        if (peerConnections.current[username].signalingState === 'have-remote-offer') {
+          console.warn('Simultaneous offers detected, restarting the connection');
+          peerConnections.current[username].restartIce(); // Restart the ICE negotiation.
+          await peerConnections.current[username].setLocalDescription(await peerConnections.current[username].createAnswer());
+          _sendMessage(peerConnections.current[username].localDescription, username, null);
+          return;
+        }
 
-      console.log(username, peerConnection)
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
+        if (peerConnections.current[username].signalingState !== 'stable') {
+            console.error(`_makeOffer: Cannot create an offer. Current signaling state is ${peerConnections.current[username].signalingState}`);return;
+        }
 
-      const sessionDescription = peerConnection.localDescription;
-      _sendMessage(sessionDescription, username, null);
+        const offer = await peerConnections.current[username].createOffer();
+        await peerConnections.current[username].setLocalDescription(offer);
 
-      console.log('_makeOffer', username)
+        const sessionDescription = peerConnections.current[username].localDescription;
+        console.log('_makeOffer', 'sessionDescription', sessionDescription)
+        _sendMessage(sessionDescription, username, null);
+
+        console.log('_makeOffer', username);
     } catch (error) {
-      console.error('_makeOffer', username, error)
+        console.log(peerConnections.current[username])
+        console.error('_makeOffer', username, error);
     }
   }
 
@@ -214,7 +219,11 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
         if (!peerConnections.current[username]) {
             _connect(username, message.type);
         }
-        peerConnections.current[username].setRemoteDescription(new RTCSessionDescription(message));
+        // if (peerConnections.current[username].signalingState !== 'stable') {
+        //   console.warn(`PeerConnection for ${username} is in ${peerConnections.current[username].signalingState} state. Restarting ICE.`);
+        //   peerConnections.current[username].restartIce();
+        // }
+        await peerConnections.current[username].setRemoteDescription(new RTCSessionDescription(message));
         _answer(username);
         break;
       case 'answer':
